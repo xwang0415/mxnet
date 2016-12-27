@@ -115,4 +115,15 @@ scala-package/*/*/target/
 .project
 .cproject
 .pydevproject
+CMakeFiles
+cmake_install.cmake
+dmlc-core
+ps-lite
 nnvm
+lib
+
+# Visual Studio Code
+.vscode
+
+# Mac OS X
+.DS_Store

@@ -47,8 +47,8 @@ endif
 
 # setup opencv
 ifeq ($(USE_OPENCV), 1)
-	CFLAGS += -DMXNET_USE_OPENCV=1 `pkg-config --cflags opencv`
-	LDFLAGS += `pkg-config --libs opencv`
+	CFLAGS += -DMXNET_USE_OPENCV=1 $(shell pkg-config --cflags opencv)
+	LDFLAGS += $(shell pkg-config --libs opencv)
 	BIN += bin/im2rec
 else
 	CFLAGS+= -DMXNET_USE_OPENCV=0
@@ -56,6 +56,35 @@ endif
 
 ifeq ($(USE_OPENMP), 1)
 	CFLAGS += -fopenmp
+endif
+
+ifeq ($(USE_NNPACK), 1)
+	CFLAGS += -DMXNET_USE_NNPACK=1
+	CFLAGS += -DMXNET_USE_NNPACK_NUM_THREADS=$(USE_NNPACK_NUM_THREADS)
+	LDFLAGS += -lnnpack
+endif
+
+ifeq ($(USE_MKL2017), 1)
+	CFLAGS += -DMXNET_USE_MKL2017=1
+	CFLAGS += -DUSE_MKL=1
+	CFLAGS += -I$(ROOTDIR)/src/operator/mkl/
+ifeq ($(USE_MKL2017_EXPERIMENTAL), 1)
+	CFLAGS += -DMKL_EXPERIMENTAL=1
+else
+	CFLAGS += -DMKL_EXPERIMENTAL=0
+endif
+ifneq ($(USE_BLAS), mkl)
+	ICC_ON=0
+	RETURN_STRING=$(shell ./prepare_mkl.sh $(ICC_ON) $(MKLML_ROOT))
+	MKLROOT=$(firstword $(RETURN_STRING))
+	MKL_LDFLAGS=-l$(word 2, $(RETURN_STRING))
+	MKL_EXTERNAL=$(lastword $(RETURN_STRING))
+ifeq ($(MKL_EXTERNAL), 1)
+	MKL_LDFLAGS+=-Wl,-rpath,$(MKLROOT)/lib
+	CFLAGS += -I$(MKLROOT)/include
+	LDFLAGS += -Wl,--as-needed -L$(MKLROOT)/lib/ -liomp5 -lmklml_intel
+endif
+endif
 endif
 
 ifeq ($(USE_CUDNN), 1)
@@ -93,17 +122,17 @@ endif
 
 all: lib/libmxnet.a lib/libmxnet.so $(BIN)
 
-SRC = $(wildcard src/*.cc src/*/*.cc)
+SRC = $(wildcard src/*.cc src/*/*.cc src/*/*/*.cc)
 OBJ = $(patsubst %.cc, build/%.o, $(SRC))
 CUSRC = $(wildcard src/*/*.cu)
 CUOBJ = $(patsubst %.cu, build/%_gpu.o, $(CUSRC))
 
 # extra operators
 ifneq ($(EXTRA_OPERATORS),)
-	EXTRA_SRC = $(wildcard $(EXTRA_OPERATORS)/*.cc $(EXTRA_OPERATORS)/*/*.cc)
-	EXTRA_OBJ = $(patsubst $(EXTRA_OPERATORS)/%.cc, $(EXTRA_OPERATORS)/build/%.o, $(EXTRA_SRC))
-	EXTRA_CUSRC = $(wildcard $(EXTRA_OPERATORS)/*.cu $(EXTRA_OPERATORS)/*/*.cu)
-	EXTRA_CUOBJ = $(patsubst $(EXTRA_OPERATORS)/%.cu, $(EXTRA_OPERATORS)/build/%_gpu.o, $(EXTRA_CUSRC))
+	EXTRA_SRC = $(wildcard $(patsubst %, %/*.cc, $(EXTRA_OPERATORS)) $(patsubst %, %/*/*.cc, $(EXTRA_OPERATORS)))
+	EXTRA_OBJ = $(patsubst %.cc, %.o, $(EXTRA_SRC))
+	EXTRA_CUSRC = $(wildcard $(patsubst %, %/*.cu, $(EXTRA_OPERATORS)) $(patsubst %, %/*/*.cu, $(EXTRA_OPERATORS)))
+	EXTRA_CUOBJ = $(patsubst %.cu, %_gpu.o, $(EXTRA_CUSRC))
 else
 	EXTRA_SRC =
 	EXTRA_OBJ =
@@ -154,30 +183,30 @@ build/src/%.o: src/%.cc
 
 build/src/%_gpu.o: src/%.cu
 	@mkdir -p $(@D)
-	$(NVCC) $(NVCCFLAGS) -Xcompiler "$(CFLAGS)" -M -MT build/src/$*_gpu.o $< >build/src/$*_gpu.d
-	$(NVCC) -c -o $@ $(NVCCFLAGS) -Xcompiler "$(CFLAGS)" $<
-
-build/plugin/%.o: plugin/%.cc
-	@mkdir -p $(@D)
-	$(CXX) -std=c++11 $(CFLAGS) -MM -MT build/plugin/$*.o $< >build/plugin/$*.d
-	$(CXX) -std=c++11 -c $(CFLAGS) -c $< -o $@
+	$(NVCC) $(NVCCFLAGS) $(CUDA_ARCH) -Xcompiler "$(CFLAGS)" -M -MT build/src/$*_gpu.o $< >build/src/$*_gpu.d
+	$(NVCC) -c -o $@ $(NVCCFLAGS) $(CUDA_ARCH) -Xcompiler "$(CFLAGS)" $<
 
 # A nvcc bug cause it to generate "generic/xxx.h" dependencies from torch headers.
 # Use CXX to generate dependency instead.
 build/plugin/%_gpu.o: plugin/%.cu
 	@mkdir -p $(@D)
 	$(CXX) -std=c++11 $(CFLAGS) -MM -MT build/plugin/$*_gpu.o $< >build/plugin/$*_gpu.d
-	$(NVCC) -c -o $@ $(NVCCFLAGS) -Xcompiler "$(CFLAGS)" $<
+	$(NVCC) -c -o $@ $(NVCCFLAGS) $(CUDA_ARCH) -Xcompiler "$(CFLAGS)" $<
 
-$(EXTRA_OPERATORS)/build/%.o: $(EXTRA_OPERATORS)/%.cc
+build/plugin/%.o: plugin/%.cc
 	@mkdir -p $(@D)
-	$(CXX) -std=c++11 $(CFLAGS) -Isrc/operator -MM -MT $(EXTRA_OPERATORS)/build/$*.o $< >$(EXTRA_OPERATORS)/build/$*.d
+	$(CXX) -std=c++11 $(CFLAGS) -MM -MT build/plugin/$*.o $< >build/plugin/$*.d
+	$(CXX) -std=c++11 -c $(CFLAGS) -c $< -o $@
+
+%_gpu.o: %.cu
+	@mkdir -p $(@D)
+	$(NVCC) $(NVCCFLAGS) $(CUDA_ARCH) -Xcompiler "$(CFLAGS) -Isrc/operator" -M -MT $*_gpu.o $< >$*_gpu.d
+	$(NVCC) -c -o $@ $(NVCCFLAGS) $(CUDA_ARCH) -Xcompiler "$(CFLAGS) -Isrc/operator" $<
+
+%.o: %.cc
+	@mkdir -p $(@D)
+	$(CXX) -std=c++11 $(CFLAGS) -Isrc/operator -MM -MT $*.o $< >$*.d
 	$(CXX) -std=c++11 -c $(CFLAGS) -Isrc/operator -c $< -o $@
-
-$(EXTRA_OPERATORS)/build/%_gpu.o: $(EXTRA_OPERATORS)/%.cu
-	@mkdir -p $(@D)
-	$(NVCC) $(NVCCFLAGS) -Xcompiler "$(CFLAGS) -Isrc/operator" -M -MT $(EXTRA_OPERATORS)/build/$*_gpu.o $< >$(EXTRA_OPERATORS)/build/$*_gpu.d
-	$(NVCC) -c -o $@ $(NVCCFLAGS) -Xcompiler "$(CFLAGS) -Isrc/operator" $<
 
 # NOTE: to statically link libmxnet.a we need the option
 # --Wl,--whole-archive -lmxnet --Wl,--no-whole-archive
@@ -197,7 +226,7 @@ PSLITE:
 $(DMLC_CORE)/libdmlc.a: DMLCCORE
 
 DMLCCORE:
-	+ cd $(DMLC_CORE); make libdmlc.a config=$(ROOTDIR)/$(config); cd $(ROOTDIR)
+	+ cd $(DMLC_CORE); make libdmlc.a USE_SSE=$(USE_SSE) config=$(ROOTDIR)/$(config); cd $(ROOTDIR)
 
 bin/im2rec: tools/im2rec.cc $(ALL_DEP)
 
@@ -268,7 +297,8 @@ clean:
 	$(RM) -r build lib bin *~ */*~ */*/*~ */*/*/*~
 	cd $(DMLC_CORE); make clean; cd -
 	cd $(PS_PATH); make clean; cd -
-	$(RM) -r $(EXTRA_OPERATORS)/build
+	$(RM) -r  $(patsubst %, %/*.d, $(EXTRA_OPERATORS)) $(patsubst %, %/*/*.d, $(EXTRA_OPERATORS))
+	$(RM) -r  $(patsubst %, %/*.o, $(EXTRA_OPERATORS)) $(patsubst %, %/*/*.o, $(EXTRA_OPERATORS))
 else
 clean:
 	$(RM) -r build lib bin *~ */*~ */*/*~ */*/*/*~
@@ -282,5 +312,5 @@ clean_all: clean
 -include build/*/*.d
 -include build/*/*/*.d
 ifneq ($(EXTRA_OPERATORS),)
-	-include $(EXTRA_OPERATORS)/build/*.d
+	-include $(patsubst %, %/*.d, $(EXTRA_OPERATORS)) $(patsubst %, %/*/*.d, $(EXTRA_OPERATORS))
 endif
